@@ -12,7 +12,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher.filters import Text
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+from aiogram.utils.executor import start_webhook
 from dotenv import load_dotenv
 from flask import Flask
 
@@ -371,50 +371,28 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Самопинг (чтобы бот не засыпал на Render) ---
+# --- Самопинг (чтобы бот не засыпал) ---
 async def ping_self():
     public_url = os.getenv('RENDER_EXTERNAL_URL')
     if not public_url:
-        print("RENDER_EXTERNAL_URL не задан, самопинг отключен")
         return
-    
     url = f"{public_url}/health"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                print(f"Self-ping: {resp.status}")
-    except Exception as e:
-        print(f"Self-ping error: {e}")
+            await session.get(url, timeout=10)
+    except:
+        pass
 
 def run_self_pinger():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     async def pinger():
         while True:
-            await asyncio.sleep(600)  # 10 минут
+            await asyncio.sleep(600)
             await ping_self()
-    
     loop.run_until_complete(pinger())
 
-# --- Запуск бота в отдельном потоке ---
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot = Bot(token=BOT_TOKEN)
-    storage = MemoryStorage()
-    dp = Dispatcher(bot, storage=storage)
-    dp.middleware.setup(LoggingMiddleware())
-    register_handlers(dp)
-    init_db()
-    executor.start_polling(dp, skip_updates=True)
-
-def start_bot_thread():
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-
-# --- Flask приложение ---
+# --- Flask для health check ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -422,19 +400,49 @@ def index():
     return "Bot is running!"
 
 @app.route('/health')
-def health_check():
+def health():
     return "OK", 200
 
-# --- Запуск ---
+# --- Запуск бота через вебхук ---
+def run_bot_with_webhook():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    bot = Bot(token=BOT_TOKEN)
+    storage = MemoryStorage()
+    dp = Dispatcher(bot, storage=storage)
+    dp.middleware.setup(LoggingMiddleware())
+    register_handlers(dp)
+    init_db()
+    
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+    WEBHOOK_URL = f"{os.getenv('RENDER_EXTERNAL_URL')}{WEBHOOK_PATH}"
+    
+    async def on_startup(dp):
+        await bot.set_webhook(WEBHOOK_URL)
+    
+    async def on_shutdown(dp):
+        await bot.delete_webhook()
+    
+    start_webhook(
+        dispatcher=dp,
+        webhook_path=WEBHOOK_PATH,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True,
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 10000))
+    )
+
 if __name__ == '__main__':
-    # Запускаем самопингер в фоновом потоке
+    # Запускаем самопингер
     pinger_thread = threading.Thread(target=run_self_pinger, daemon=True)
     pinger_thread.start()
-    print("✅ Самопингер запущен (будет пинговать себя каждые 10 минут)")
     
-    # Запускаем бота в фоновом потоке
-    start_bot_thread()
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot_with_webhook, daemon=True)
+    bot_thread.start()
     
-    # Запускаем Flask сервер
-    port = int(os.environ.get("PORT", 5000))
+    # Запускаем Flask
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
