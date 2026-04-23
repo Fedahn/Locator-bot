@@ -1,7 +1,6 @@
 import logging
 import sqlite3
 import asyncio
-import threading
 import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
@@ -11,7 +10,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher.filters import Text
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+from aiogram.utils.executor import start_webhook
 from dotenv import load_dotenv
 from flask import Flask
 
@@ -96,7 +95,6 @@ def get_driver_keyboard():
     return kb
 
 async def notify_employees_about_start():
-    """Отправляет уведомление всем сотрудникам о начале маршрута"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE role = 'employee'")
@@ -115,7 +113,6 @@ async def notify_employees_about_start():
             pass
 
 async def notify_driver_about_new_request(user_name, pickup_point):
-    """Отправляет уведомление водителю о новой заявке"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
@@ -129,7 +126,6 @@ async def notify_driver_about_new_request(user_name, pickup_point):
         )
 
 async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
-    """Деактивирует трекер и очищает заявки"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT live_chat_id, live_message_id FROM driver_tracker WHERE user_id = ?", (user_id,))
@@ -144,7 +140,6 @@ async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
     cur.execute("DELETE FROM driver_tracker WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    # Очищаем все активные заявки
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("DELETE FROM ride_requests WHERE status = 'active'")
@@ -240,7 +235,6 @@ def register_handlers(dp: Dispatcher):
             await callback.message.answer('Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
         await callback.answer()
 
-    # --- Сотрудник: Я еду (выбор точки посадки) ---
     @dp.message_handler(Text(equals='🙋‍♂️ Я еду'))
     async def i_go(message: types.Message):
         kb = InlineKeyboardMarkup(row_width=1)
@@ -253,7 +247,6 @@ def register_handlers(dp: Dispatcher):
     async def point_selected(callback: types.CallbackQuery):
         point = callback.data.split('_')[1]
         user_id = callback.from_user.id
-        # Проверяем, активен ли трекер (есть ли водитель в пути)
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM driver_tracker WHERE is_active = 1 LIMIT 1")
@@ -263,10 +256,8 @@ def register_handlers(dp: Dispatcher):
             conn.close()
             await callback.answer()
             return
-        # Сохраняем заявку
         cur.execute('INSERT INTO ride_requests (user_id, pickup_point) VALUES (?, ?)', (user_id, point))
         conn.commit()
-        # Получаем имя сотрудника
         cur.execute('SELECT first_name, last_name FROM users WHERE user_id = ?', (user_id,))
         user = cur.fetchone()
         conn.close()
@@ -276,7 +267,6 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(f'✅ Заявка на посадку в точке "{point}" создана!')
         await callback.answer()
 
-    # --- Сотрудник: Где водитель? ---
     @dp.message_handler(Text(equals='👀 Где водитель?'))
     async def where_driver(message: types.Message):
         conn = sqlite3.connect('locator.db')
@@ -290,7 +280,6 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('🚫 Водитель сейчас не в пути или не поделился своей геолокацией.')
 
-    # --- Сотрудник: Отменить мою заявку ---
     @dp.message_handler(Text(equals='❌ Отменить мою заявку'))
     async def cancel_my_request(message: types.Message):
         user_id = message.from_user.id
@@ -302,7 +291,6 @@ def register_handlers(dp: Dispatcher):
             cur.execute("DELETE FROM ride_requests WHERE request_id = ?", (request[0],))
             conn.commit()
             await message.answer(f'❌ Ваша заявка на точку "{request[1]}" отменена.')
-            # Уведомляем водителя
             cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
             driver = cur.fetchone()
             if driver:
@@ -311,7 +299,6 @@ def register_handlers(dp: Dispatcher):
             await message.answer('❌ У вас нет активных заявок.')
         conn.close()
 
-    # --- Водитель: ручная отправка геолокации ---
     @dp.message_handler(content_types=['location'])
     async def driver_location(message: types.Message):
         user_id = message.from_user.id
@@ -330,7 +317,6 @@ def register_handlers(dp: Dispatcher):
             await message.answer('⛔ Вы не зарегистрированы как водитель.')
         conn.close()
 
-    # --- Водитель: включение Live Location ---
     @dp.message_handler(Text(equals='🟢 Включить Live Location'))
     async def ask_live_location(message: types.Message):
         user_id = message.from_user.id
@@ -378,17 +364,14 @@ def register_handlers(dp: Dispatcher):
             "Вы можете просматривать заявки по кнопке '📋 Список заявок'.",
             reply_markup=get_driver_keyboard()
         )
-        # Отправляем уведомление всем сотрудникам
         await notify_employees_about_start()
 
-    # --- Водитель: остановка трансляции ---
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
         user_id = message.from_user.id
         await deactivate_tracker(dp.bot, user_id, stop_live=True)
         await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
 
-    # --- Водитель: список заявок ---
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
         user_id = message.from_user.id
@@ -423,7 +406,6 @@ def register_handlers(dp: Dispatcher):
             text += f"👤 {first_name} {last_name}\n📍 {point}\n🕒 {created}\n---\n"
         await message.answer(text, parse_mode='Markdown')
 
-    # --- Водитель: статистика (кто едет) ---
     @dp.message_handler(Text(equals='📊 Кто едет?'))
     async def show_stats(message: types.Message):
         conn = sqlite3.connect('locator.db')
@@ -460,24 +442,7 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Запуск бота в потоке (polling) ---
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot = Bot(token=BOT_TOKEN)
-    storage = MemoryStorage()
-    dp = Dispatcher(bot, storage=storage)
-    dp.middleware.setup(LoggingMiddleware())
-    register_handlers(dp)
-    init_db()
-    executor.start_polling(dp, skip_updates=True)
-
-def start_bot_thread():
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-
-# --- Flask для health check ---
+# --- Flask приложение (для health check) ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -488,8 +453,28 @@ def index():
 def health():
     return "OK", 200
 
-# --- Запуск ---
+# --- Запуск бота через вебхук ---
+async def on_startup(dp):
+    webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
+    await dp.bot.set_webhook(webhook_url)
+    logging.info(f"Webhook set to {webhook_url}")
+
+async def on_shutdown(dp):
+    await dp.bot.delete_webhook()
+
 if __name__ == '__main__':
-    start_bot_thread()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    bot = Bot(token=BOT_TOKEN)
+    storage = MemoryStorage()
+    dp = Dispatcher(bot, storage=storage)
+    dp.middleware.setup(LoggingMiddleware())
+    register_handlers(dp)
+    init_db()
+    
+    start_webhook(
+        dispatcher=dp,
+        webhook_path='/webhook',
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 10000))
+    )
