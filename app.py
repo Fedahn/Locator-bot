@@ -1,7 +1,6 @@
 import logging
 import sqlite3
 import asyncio
-import threading
 import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
@@ -13,18 +12,13 @@ from aiogram.dispatcher.filters import Text
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.executor import start_webhook
 from dotenv import load_dotenv
-from flask import Flask
 
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 # === НАСТРОЙКИ ===
-# ID супергруппы, куда бот будет отправлять Live Location
-# !!! ВАЖНО: Бот должен быть добавлен в эту группу как участник !!!
 GROUP_CHAT_ID = -1003593347493
-
-# ID администраторов (добавьте свой Telegram ID)
-ADMIN_IDS = []  # Например: [123456789]
+ADMIN_IDS = []  # Добавьте свой Telegram ID
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
@@ -119,7 +113,6 @@ def get_admin_keyboard():
     return kb
 
 async def notify_driver_about_new_request(user_name, pickup_point):
-    """Отправляет уведомление водителю о новой заявке"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
@@ -132,8 +125,7 @@ async def notify_driver_about_new_request(user_name, pickup_point):
             parse_mode='Markdown'
         )
 
-async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
-    """Деактивирует трекер и очищает заявки"""
+async def deactivate_tracker(user_id: int, stop_live: bool = True):
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT live_chat_id, live_message_id FROM driver_tracker WHERE user_id = ?", (user_id,))
@@ -148,7 +140,6 @@ async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
     cur.execute("DELETE FROM driver_tracker WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    # Очищаем все активные заявки
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("DELETE FROM ride_requests WHERE status = 'active'")
@@ -156,13 +147,12 @@ async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
     conn.close()
     logging.info(f"Tracker deactivated, all requests cleared")
 
-async def auto_expire_tracker(bot, user_id: int, expire_time: datetime):
+async def auto_expire_tracker(user_id: int, expire_time: datetime):
     delay = (expire_time - datetime.now()).total_seconds()
     if delay > 0:
         await asyncio.sleep(delay)
-    await deactivate_tracker(bot, user_id, stop_live=True)
+    await deactivate_tracker(user_id, stop_live=True)
     await bot.send_message(user_id, "⏰ 2-часовой локатор истёк. Заявки сброшены.", reply_markup=get_driver_keyboard())
-    # Отправляем уведомление в группу
     await bot.send_message(GROUP_CHAT_ID, "⏰ Трансляция местоположения завершена. Заявки сброшены.")
 
 def adapt_datetime(dt: datetime):
@@ -454,7 +444,6 @@ def register_handlers(dp: Dispatcher):
         lat = message.location.latitude
         lon = message.location.longitude
         
-        # Сохраняем координаты в БД
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
         cur.execute('INSERT OR REPLACE INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
@@ -464,7 +453,6 @@ def register_handlers(dp: Dispatcher):
         
         await message.delete()
         
-        # Отправляем Live Location в супергруппу
         live_message = await bot.send_location(
             chat_id=GROUP_CHAT_ID,
             latitude=lat,
@@ -482,7 +470,7 @@ def register_handlers(dp: Dispatcher):
         conn.commit()
         conn.close()
         
-        asyncio.create_task(auto_expire_tracker(bot, user_id, expire_time))
+        asyncio.create_task(auto_expire_tracker(user_id, expire_time))
         await state.finish()
         
         await message.answer(
@@ -492,7 +480,6 @@ def register_handlers(dp: Dispatcher):
             reply_markup=get_driver_keyboard()
         )
         
-        # Отправляем приветственное сообщение в группу
         await bot.send_message(
             GROUP_CHAT_ID,
             "🚌 *Водитель начал маршрут!*\n\n"
@@ -504,7 +491,7 @@ def register_handlers(dp: Dispatcher):
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
         user_id = message.from_user.id
-        await deactivate_tracker(bot, user_id, stop_live=True)
+        await deactivate_tracker(user_id, stop_live=True)
         await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
 
     @dp.message_handler(Text(equals='📋 Список заявок'))
@@ -577,18 +564,7 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Flask для health check (для Render) ---
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def index():
-    return "Bot is running!"
-
-@flask_app.route('/health')
-def health():
-    return "OK", 200
-
-# --- Запуск вебхука (для Render) ---
+# --- Запуск вебхука ---
 async def on_startup(dp):
     webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
     await bot.set_webhook(webhook_url)
@@ -599,19 +575,9 @@ async def on_shutdown(dp):
     await dp.storage.close()
     await dp.storage.wait_closed()
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
-
 if __name__ == '__main__':
     init_db()
     register_handlers(dp)
-    
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Запускаем бота через вебхук
     start_webhook(
         dispatcher=dp,
         webhook_path='/webhook',
