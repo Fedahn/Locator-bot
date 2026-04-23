@@ -145,7 +145,7 @@ async def deactivate_tracker(user_id: int, stop_live: bool = True):
     cur.execute("DELETE FROM ride_requests WHERE status = 'active'")
     conn.commit()
     conn.close()
-    logging.info(f"Tracker deactivated, all requests cleared")
+    logging.info(f"Tracker deactivated")
 
 async def auto_expire_tracker(user_id: int, expire_time: datetime):
     delay = (expire_time - datetime.now()).total_seconds()
@@ -169,16 +169,11 @@ def register_handlers(dp: Dispatcher):
         if user_id not in ADMIN_IDS:
             await message.answer('⛔ У вас нет доступа к админ-панели.')
             return
-        await message.answer(
-            '🔐 *Админ-панель*\n\nВыберите действие:',
-            parse_mode='Markdown',
-            reply_markup=get_admin_keyboard()
-        )
+        await message.answer('🔐 *Админ-панель*\n\nВыберите действие:', parse_mode='Markdown', reply_markup=get_admin_keyboard())
 
     @dp.message_handler(Text(equals='🗑️ Очистить все заявки'))
     async def admin_clear_requests(message: types.Message):
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
+        if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
         conn = sqlite3.connect('locator.db')
@@ -190,8 +185,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message_handler(Text(equals='👥 Очистить всех пользователей'))
     async def admin_clear_users(message: types.Message):
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
+        if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
         conn = sqlite3.connect('locator.db')
@@ -202,12 +196,11 @@ def register_handlers(dp: Dispatcher):
         cur.execute("DELETE FROM driver_tracker")
         conn.commit()
         conn.close()
-        await message.answer('✅ Все пользователи и связанные данные удалены.', reply_markup=get_admin_keyboard())
+        await message.answer('✅ Все пользователи удалены.', reply_markup=get_admin_keyboard())
 
     @dp.message_handler(Text(equals='🗄️ Очистить всю БД'))
     async def admin_clear_all(message: types.Message):
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
+        if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
         conn = sqlite3.connect('locator.db')
@@ -222,8 +215,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message_handler(Text(equals='📊 Статистика БД'))
     async def admin_stats(message: types.Message):
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
+        if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
         conn = sqlite3.connect('locator.db')
@@ -238,30 +230,24 @@ def register_handlers(dp: Dispatcher):
         active_tracker = cur.fetchone()[0]
         conn.close()
         await message.answer(
-            f"📊 *Статистика базы данных*\n\n"
-            f"👥 Пользователей: {users_count}\n"
-            f"📝 Активных заявок: {active_requests}\n"
-            f"📋 Всего заявок: {total_requests}\n"
-            f"🚌 Активный трекер водителя: {'Да' if active_tracker else 'Нет'}",
-            parse_mode='Markdown',
-            reply_markup=get_admin_keyboard()
+            f"📊 *Статистика*\n\n👥 Пользователей: {users_count}\n📝 Активных заявок: {active_requests}\n📋 Всего заявок: {total_requests}\n🚌 Активный трекер: {'Да' if active_tracker else 'Нет'}",
+            parse_mode='Markdown', reply_markup=get_admin_keyboard()
         )
 
     @dp.message_handler(Text(equals='🔙 Выйти из админ-панели'))
     async def admin_exit(message: types.Message):
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
+        if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
-        cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
+        cur.execute('SELECT role FROM users WHERE user_id = ?', (message.from_user.id,))
         user = cur.fetchone()
         conn.close()
         if user and user[0] == 'employee':
-            await message.answer('Выход из админ-панели.', reply_markup=get_employee_keyboard())
+            await message.answer('Выход.', reply_markup=get_employee_keyboard())
         else:
-            await message.answer('Выход из админ-панели.', reply_markup=get_driver_keyboard())
+            await message.answer('Выход.', reply_markup=get_driver_keyboard())
 
     @dp.message_handler(Text(equals='▶️ Начать'))
     async def start_button(message: types.Message):
@@ -278,11 +264,11 @@ def register_handlers(dp: Dispatcher):
         if user:
             role = user[0]
             if role == 'employee':
-                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
+                await message.answer('👋 Вы сотрудник.', reply_markup=get_employee_keyboard())
             else:
-                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
+                await message.answer('👋 Вы водитель.', reply_markup=get_driver_keyboard())
         else:
-            await message.answer('Добро пожаловать! Давайте зарегистрируемся. Введите ваше имя:', reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
+            await message.answer('Давайте зарегистрируемся. Введите ваше имя:', reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
             await Registration.first_name.set()
 
     @dp.message_handler(state=Registration.first_name)
@@ -292,7 +278,7 @@ def register_handlers(dp: Dispatcher):
             await message.answer('Регистрация отменена.', reply_markup=get_start_keyboard())
             return
         await state.update_data(first_name=message.text)
-        await message.answer('Спасибо! Теперь введите вашу фамилию:')
+        await message.answer('Введите фамилию:')
         await Registration.last_name.set()
 
     @dp.message_handler(state=Registration.last_name)
@@ -329,11 +315,11 @@ def register_handlers(dp: Dispatcher):
                     (user_id, username, first_name, last_name, role))
         conn.commit()
         conn.close()
-        await callback.message.edit_text('✅ Регистрация успешно завершена!')
+        await callback.message.edit_text('✅ Регистрация завершена!')
         if role == 'employee':
-            await callback.message.answer('Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
+            await callback.message.answer('Вы сотрудник.', reply_markup=get_employee_keyboard())
         else:
-            await callback.message.answer('Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
+            await callback.message.answer('Вы водитель.', reply_markup=get_driver_keyboard())
         await callback.answer()
 
     @dp.message_handler(Text(equals='🙋‍♂️ Я еду'))
@@ -353,7 +339,7 @@ def register_handlers(dp: Dispatcher):
         cur.execute("SELECT user_id FROM driver_tracker WHERE is_active = 1 LIMIT 1")
         driver_active = cur.fetchone()
         if not driver_active:
-            await callback.message.edit_text('❌ Водитель не в пути. Дождитесь начала маршрута.')
+            await callback.message.edit_text('❌ Водитель не в пути.')
             conn.close()
             await callback.answer()
             return
@@ -365,7 +351,7 @@ def register_handlers(dp: Dispatcher):
         if user:
             user_name = f"{user[0]} {user[1]}"
             await notify_driver_about_new_request(user_name, point)
-        await callback.message.edit_text(f'✅ Заявка на посадку в точке "{point}" создана!')
+        await callback.message.edit_text(f'✅ Заявка на "{point}" создана!')
         await callback.answer()
 
     @dp.message_handler(Text(equals='👀 Где водитель?'))
@@ -376,10 +362,9 @@ def register_handlers(dp: Dispatcher):
         loc = cur.fetchone()
         conn.close()
         if loc and loc[0] is not None:
-            lat, lon = loc
-            await message.answer_location(latitude=lat, longitude=lon)
+            await message.answer_location(latitude=loc[0], longitude=loc[1])
         else:
-            await message.answer('🚫 Водитель сейчас не в пути или не поделился своей геолокацией.')
+            await message.answer('🚫 Водитель не в пути.')
 
     @dp.message_handler(Text(equals='❌ Отменить мою заявку'))
     async def cancel_my_request(message: types.Message):
@@ -391,31 +376,29 @@ def register_handlers(dp: Dispatcher):
         if request:
             cur.execute("DELETE FROM ride_requests WHERE request_id = ?", (request[0],))
             conn.commit()
-            await message.answer(f'❌ Ваша заявка на точку "{request[1]}" отменена.')
+            await message.answer(f'❌ Заявка на "{request[1]}" отменена.')
             cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
             driver = cur.fetchone()
             if driver:
                 await bot.send_message(driver[0], f"❌ Заявка отменена!\n👤 {message.from_user.first_name} {message.from_user.last_name}\n📍 {request[1]}")
         else:
-            await message.answer('❌ У вас нет активных заявок.')
+            await message.answer('❌ Нет активных заявок.')
         conn.close()
 
     @dp.message_handler(content_types=['location'])
     async def driver_location(message: types.Message):
         user_id = message.from_user.id
-        lat = message.location.latitude
-        lon = message.location.longitude
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
         cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
         user = cur.fetchone()
         if user and user[0] == 'driver':
             cur.execute('INSERT OR REPLACE INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
-                        (user_id, lat, lon))
+                        (user_id, message.location.latitude, message.location.longitude))
             conn.commit()
-            await message.answer('✅ Ваша геолокация обновлена!', reply_markup=get_driver_keyboard())
+            await message.answer('✅ Геолокация обновлена!', reply_markup=get_driver_keyboard())
         else:
-            await message.answer('⛔ Вы не зарегистрированы как водитель.')
+            await message.answer('⛔ Вы не водитель.')
         conn.close()
 
     @dp.message_handler(Text(equals='🟢 Включить Live Location'))
@@ -431,11 +414,7 @@ def register_handlers(dp: Dispatcher):
             return
         markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         markup.add(KeyboardButton('📍 Поделиться геолокацией', request_location=True))
-        await message.answer(
-            "📍 Нажмите на кнопку ниже и отправьте ваше текущее местоположение, чтобы начать 2-часовую трансляцию.\n\n"
-            "После этого сотрудники получат уведомление и смогут отправлять заявки.",
-            reply_markup=markup
-        )
+        await message.answer("📍 Нажмите кнопку и отправьте геолокацию:", reply_markup=markup)
         await LiveLocationStates.waiting_for_location.set()
 
     @dp.message_handler(content_types=['location'], state=LiveLocationStates.waiting_for_location)
@@ -446,111 +425,59 @@ def register_handlers(dp: Dispatcher):
         
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
-        cur.execute('INSERT OR REPLACE INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
-                    (user_id, lat, lon))
+        cur.execute('INSERT OR REPLACE INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)', (user_id, lat, lon))
         conn.commit()
         conn.close()
         
         await message.delete()
         
-        live_message = await bot.send_location(
-            chat_id=GROUP_CHAT_ID,
-            latitude=lat,
-            longitude=lon,
-            live_period=7200
-        )
+        live_message = await bot.send_location(chat_id=GROUP_CHAT_ID, latitude=lat, longitude=lon, live_period=7200)
         
         expire_time = datetime.now() + timedelta(seconds=7200)
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
-        cur.execute('''
-            INSERT OR REPLACE INTO driver_tracker (user_id, is_active, start_time, expire_time, live_message_id, live_chat_id)
-            VALUES (?, 1, ?, ?, ?, ?)
-        ''', (user_id, datetime.now(), expire_time, live_message.message_id, live_message.chat.id))
+        cur.execute('INSERT OR REPLACE INTO driver_tracker (user_id, is_active, start_time, expire_time, live_message_id, live_chat_id) VALUES (?, 1, ?, ?, ?, ?)',
+                    (user_id, datetime.now(), expire_time, live_message.message_id, live_message.chat.id))
         conn.commit()
         conn.close()
         
         asyncio.create_task(auto_expire_tracker(user_id, expire_time))
         await state.finish()
         
-        await message.answer(
-            "✅ Трансляция запущена на 2 часа!\n\n"
-            "📍 Карта с вашим местоположением отправлена в общий чат.\n"
-            "Все сотрудники теперь видят, где вы находитесь.",
-            reply_markup=get_driver_keyboard()
-        )
-        
-        await bot.send_message(
-            GROUP_CHAT_ID,
-            "🚌 *Водитель начал маршрут!*\n\n"
-            "📍 Вы можете видеть его местоположение на карте выше.\n"
-            "📝 Для заказа отправьте заявку боту в личные сообщения.",
-            parse_mode='Markdown'
-        )
+        await message.answer("✅ Трансляция запущена на 2 часа!", reply_markup=get_driver_keyboard())
+        await bot.send_message(GROUP_CHAT_ID, "🚌 Водитель начал маршрут! Отправляйте заявки в личку боту.", parse_mode='Markdown')
 
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
-        user_id = message.from_user.id
-        await deactivate_tracker(user_id, stop_live=True)
-        await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
+        await deactivate_tracker(message.from_user.id, stop_live=True)
+        await message.answer("🔴 Трансляция остановлена.", reply_markup=get_driver_keyboard())
 
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
-        user_id = message.from_user.id
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
-        cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
-        user = cur.fetchone()
-        if not user or user[0] != 'driver':
-            await message.answer('⛔ Только для водителей.')
-            conn.close()
-            return
-        cur.execute('''
-            SELECT ride_requests.request_id, users.first_name, users.last_name, ride_requests.pickup_point, ride_requests.created_at
-            FROM ride_requests
-            JOIN users ON ride_requests.user_id = users.user_id
-            WHERE ride_requests.status = 'active'
-            ORDER BY 
-                CASE ride_requests.pickup_point
-                    WHEN 'Автобаза' THEN 1
-                    WHEN 'КДП' THEN 2
-                    WHEN 'Город' THEN 3
-                END,
-                ride_requests.created_at ASC
-        ''')
+        cur.execute('SELECT first_name, last_name, pickup_point, created_at FROM ride_requests JOIN users ON ride_requests.user_id = users.user_id WHERE status = "active" ORDER BY created_at')
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            await message.answer('📭 Нет активных заявок.')
+            await message.answer('📭 Нет заявок.')
             return
-        text = "📋 *Активные заявки (в порядке маршрута):*\n\n"
-        for req_id, first_name, last_name, point, created in rows:
-            text += f"👤 {first_name} {last_name}\n📍 {point}\n🕒 {created}\n---\n"
+        text = "📋 *Заявки:*\n\n"
+        for fn, ln, point, created in rows:
+            text += f"👤 {fn} {ln}\n📍 {point}\n🕒 {created}\n---\n"
         await message.answer(text, parse_mode='Markdown')
 
     @dp.message_handler(Text(equals='📊 Кто едет?'))
     async def show_stats(message: types.Message):
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
-        cur.execute('''
-            SELECT pickup_point, COUNT(*), GROUP_CONCAT(first_name || " " || last_name, ", ")
-            FROM ride_requests
-            JOIN users ON ride_requests.user_id = users.user_id
-            WHERE status = 'active'
-            GROUP BY pickup_point
-            ORDER BY 
-                CASE pickup_point
-                    WHEN 'Автобаза' THEN 1
-                    WHEN 'КДП' THEN 2
-                    WHEN 'Город' THEN 3
-                END
-        ''')
+        cur.execute('SELECT pickup_point, COUNT(*), GROUP_CONCAT(first_name || " " || last_name, ", ") FROM ride_requests JOIN users ON ride_requests.user_id = users.user_id WHERE status = "active" GROUP BY pickup_point')
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            await message.answer('📭 Нет активных заявок.')
+            await message.answer('📭 Нет заявок.')
             return
-        text = "📊 *Кто едет:*\n\n"
+        text = "📊 *Статистика:*\n\n"
         for point, count, names in rows:
             text += f"*{point}*: {count} чел.\n👥 {names}\n\n"
         await message.answer(text, parse_mode='Markdown')
@@ -562,9 +489,9 @@ def register_handlers(dp: Dispatcher):
             await state.finish()
             await message.answer('Действие отменено.', reply_markup=get_start_keyboard())
         else:
-            await message.answer('Нет активного действия для отмены.')
+            await message.answer('Нет активного действия.')
 
-# --- Запуск вебхука ---
+# --- Запуск ---
 async def on_startup(dp):
     webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
     await bot.set_webhook(webhook_url)
