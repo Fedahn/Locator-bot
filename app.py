@@ -38,7 +38,7 @@ temp_user_data = {}
 
 # --- База данных ---
 def init_db():
-    conn = sqlite3.connect('locator.db')
+    conn = sqlite3.connect('locator.db', timeout=10)
     cur = conn.cursor()
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -114,7 +114,7 @@ def get_admin_keyboard():
     return kb
 
 async def notify_driver_about_new_request(user_name, pickup_point):
-    conn = sqlite3.connect('locator.db')
+    conn = sqlite3.connect('locator.db', timeout=10)
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
     driver = cur.fetchone()
@@ -127,7 +127,7 @@ async def notify_driver_about_new_request(user_name, pickup_point):
         )
 
 async def deactivate_tracker(user_id: int, stop_live: bool = True):
-    conn = sqlite3.connect('locator.db')
+    conn = sqlite3.connect('locator.db', timeout=10)
     cur = conn.cursor()
     cur.execute("SELECT live_chat_id, live_message_id FROM driver_tracker WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
@@ -141,7 +141,7 @@ async def deactivate_tracker(user_id: int, stop_live: bool = True):
     cur.execute("DELETE FROM driver_tracker WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    conn = sqlite3.connect('locator.db')
+    conn = sqlite3.connect('locator.db', timeout=10)
     cur = conn.cursor()
     cur.execute("DELETE FROM ride_requests WHERE status = 'active'")
     conn.commit()
@@ -178,7 +178,7 @@ def register_handlers(dp: Dispatcher):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("DELETE FROM ride_requests")
         conn.commit()
@@ -190,7 +190,7 @@ def register_handlers(dp: Dispatcher):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("DELETE FROM users")
         cur.execute("DELETE FROM ride_requests")
@@ -205,7 +205,7 @@ def register_handlers(dp: Dispatcher):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = cur.fetchall()
@@ -220,20 +220,33 @@ def register_handlers(dp: Dispatcher):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
-        cur = conn.cursor()
-        cur.execute('INSERT INTO ride_requests (user_id, pickup_point, status) VALUES (?, ?, ?)', 
-                    (994960688, 'Автобаза', 'active'))
-        conn.commit()
-        conn.close()
-        await message.answer('✅ Тестовая заявка на точку "Автобаза" добавлена!', reply_markup=get_admin_keyboard())
+        
+        # Повторные попытки при блокировке БД
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect('locator.db', timeout=10)
+                cur = conn.cursor()
+                cur.execute('INSERT INTO ride_requests (user_id, pickup_point, status) VALUES (?, ?, ?)', 
+                            (994960688, 'Автобаза', 'active'))
+                conn.commit()
+                conn.close()
+                await message.answer('✅ Тестовая заявка на точку "Автобаза" добавлена!', reply_markup=get_admin_keyboard())
+                return
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    await message.answer(f'❌ Ошибка БД: {e}')
+                    return
 
     @dp.message_handler(Text(equals='📊 Статистика БД'))
     async def admin_stats(message: types.Message):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM users")
         users_count = cur.fetchone()[0]
@@ -254,7 +267,7 @@ def register_handlers(dp: Dispatcher):
         if message.from_user.id not in ADMIN_IDS:
             await message.answer('⛔ Доступ запрещён.')
             return
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT role FROM users WHERE user_id = ?', (message.from_user.id,))
         user = cur.fetchone()
@@ -272,7 +285,7 @@ def register_handlers(dp: Dispatcher):
     @dp.message_handler(commands=['start'])
     async def cmd_start(message: types.Message):
         user_id = message.from_user.id
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
         user = cur.fetchone()
@@ -325,7 +338,7 @@ def register_handlers(dp: Dispatcher):
         first_name = user.get('first_name', '')
         last_name = user.get('last_name', '')
         username = user.get('telegram_username', '')
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('INSERT INTO users (user_id, telegram_username, first_name, last_name, role) VALUES (?, ?, ?, ?, ?)',
                     (user_id, username, first_name, last_name, role))
@@ -351,7 +364,7 @@ def register_handlers(dp: Dispatcher):
     async def point_selected(callback: types.CallbackQuery):
         point = callback.data.split('_')[1]
         user_id = callback.from_user.id
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM driver_tracker WHERE is_active = 1 LIMIT 1")
         driver_active = cur.fetchone()
@@ -374,7 +387,7 @@ def register_handlers(dp: Dispatcher):
     # --- Сотрудник: Где водитель? ---
     @dp.message_handler(Text(equals='👀 Где водитель?'))
     async def where_driver(message: types.Message):
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT latitude, longitude FROM driver_locations ORDER BY updated_at DESC LIMIT 1')
         loc = cur.fetchone()
@@ -388,7 +401,7 @@ def register_handlers(dp: Dispatcher):
     @dp.message_handler(Text(equals='❌ Отменить мою заявку'))
     async def cancel_my_request(message: types.Message):
         user_id = message.from_user.id
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute("SELECT request_id, pickup_point FROM ride_requests WHERE user_id = ? AND status = 'active'", (user_id,))
         request = cur.fetchone()
@@ -410,7 +423,7 @@ def register_handlers(dp: Dispatcher):
         user_id = message.from_user.id
         lat = message.location.latitude
         lon = message.location.longitude
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
         user = cur.fetchone()
@@ -427,7 +440,7 @@ def register_handlers(dp: Dispatcher):
     @dp.message_handler(Text(equals='🟢 Включить Live Location'))
     async def ask_live_location(message: types.Message):
         user_id = message.from_user.id
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT is_active FROM driver_tracker WHERE user_id = ?', (user_id,))
         row = cur.fetchone()
@@ -449,7 +462,7 @@ def register_handlers(dp: Dispatcher):
         user_id = message.from_user.id
         lat = message.location.latitude
         lon = message.location.longitude
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('INSERT OR REPLACE INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
                     (user_id, lat, lon))
@@ -458,7 +471,7 @@ def register_handlers(dp: Dispatcher):
         await message.delete()
         live_message = await bot.send_location(chat_id=GROUP_CHAT_ID, latitude=lat, longitude=lon, live_period=7200)
         expire_time = datetime.now() + timedelta(seconds=7200)
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('INSERT OR REPLACE INTO driver_tracker (user_id, is_active, start_time, expire_time, live_message_id, live_chat_id) VALUES (?, 1, ?, ?, ?, ?)',
                     (user_id, datetime.now(), expire_time, live_message.message_id, live_message.chat.id))
@@ -479,7 +492,7 @@ def register_handlers(dp: Dispatcher):
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
         user_id = message.from_user.id
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
         user = cur.fetchone()
@@ -513,7 +526,7 @@ def register_handlers(dp: Dispatcher):
     # --- Водитель: статистика ---
     @dp.message_handler(Text(equals='📊 Кто едет?'))
     async def show_stats(message: types.Message):
-        conn = sqlite3.connect('locator.db')
+        conn = sqlite3.connect('locator.db', timeout=10)
         cur = conn.cursor()
         cur.execute('''
             SELECT pickup_point, COUNT(*), GROUP_CONCAT(first_name || " " || last_name, ", ")
