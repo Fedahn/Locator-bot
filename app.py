@@ -1,7 +1,6 @@
 import logging
 import sqlite3
 import asyncio
-import aiohttp
 import threading
 import os
 from datetime import datetime, timedelta
@@ -12,7 +11,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher.filters import Text
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.executor import start_webhook
+from aiogram.utils import executor
 from dotenv import load_dotenv
 from flask import Flask
 
@@ -46,7 +45,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS ride_requests (
             request_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
-            pickup_point TEXT CHECK(pickup_point IN ('ПРЦ', 'ОРЛ А', 'КДП', 'РЭМ', 'Город')),
+            pickup_point TEXT CHECK(pickup_point IN ('Автобаза', 'КДП', 'Город')),
             status TEXT DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
@@ -84,24 +83,53 @@ def get_employee_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('🙋‍♂️ Я еду'))
     kb.add(KeyboardButton('👀 Где водитель?'))
+    kb.add(KeyboardButton('❌ Отменить мою заявку'))
     return kb
 
 def get_driver_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('📍 Отправить мою геолокацию'))
     kb.add(KeyboardButton('📋 Список заявок'))
+    kb.add(KeyboardButton('📊 Кто едет?'))
     kb.add(KeyboardButton('🟢 Включить Live Location'))
     kb.add(KeyboardButton('🔴 Остановить трансляцию'))
     return kb
 
-def expire_ride_requests():
+async def notify_employees_about_start():
+    """Отправляет уведомление всем сотрудникам о начале маршрута"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
-    cur.execute("UPDATE ride_requests SET status = 'expired' WHERE status = 'active'")
-    conn.commit()
+    cur.execute("SELECT user_id FROM users WHERE role = 'employee'")
+    employees = cur.fetchall()
     conn.close()
+    for emp in employees:
+        try:
+            await bot.send_message(
+                emp[0],
+                "🚌 *Водитель начал маршрут!*\n\n"
+                "Вы можете отправить заявку на посадку, нажав кнопку «🙋‍♂️ Я еду».\n"
+                "Доступные точки: Автобаза, КДП, Город.",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+
+async def notify_driver_about_new_request(user_name, pickup_point):
+    """Отправляет уведомление водителю о новой заявке"""
+    conn = sqlite3.connect('locator.db')
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
+    driver = cur.fetchone()
+    conn.close()
+    if driver:
+        await bot.send_message(
+            driver[0],
+            f"🆕 *Новая заявка!*\n\n👤 {user_name}\n📍 Точка: {pickup_point}",
+            parse_mode='Markdown'
+        )
 
 async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
+    """Деактивирует трекер и очищает заявки"""
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
     cur.execute("SELECT live_chat_id, live_message_id FROM driver_tracker WHERE user_id = ?", (user_id,))
@@ -116,20 +144,20 @@ async def deactivate_tracker(bot, user_id: int, stop_live: bool = True):
     cur.execute("DELETE FROM driver_tracker WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    expire_ride_requests()
+    # Очищаем все активные заявки
     conn = sqlite3.connect('locator.db')
     cur = conn.cursor()
-    cur.execute("DELETE FROM driver_locations WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM ride_requests WHERE status = 'active'")
     conn.commit()
     conn.close()
-    logging.info(f"Tracker deactivated for driver {user_id}")
+    logging.info(f"Tracker deactivated, all requests cleared")
 
 async def auto_expire_tracker(bot, user_id: int, expire_time: datetime):
     delay = (expire_time - datetime.now()).total_seconds()
     if delay > 0:
         await asyncio.sleep(delay)
     await deactivate_tracker(bot, user_id, stop_live=True)
-    await bot.send_message(user_id, "⏰ Ваш 2-часовой локатор истёк. Все заявки сброшены. Чтобы продолжить, включите локатор заново.", reply_markup=get_driver_keyboard())
+    await bot.send_message(user_id, "⏰ 2-часовой локатор истёк. Заявки сброшены.", reply_markup=get_driver_keyboard())
 
 def adapt_datetime(dt: datetime):
     return dt.isoformat()
@@ -137,6 +165,8 @@ sqlite3.register_adapter(datetime, adapt_datetime)
 
 # --- Хендлеры ---
 def register_handlers(dp: Dispatcher):
+    temp_user_data = {}
+
     @dp.message_handler(Text(equals='▶️ Начать'))
     async def start_button(message: types.Message):
         await cmd_start(message)
@@ -210,25 +240,43 @@ def register_handlers(dp: Dispatcher):
             await callback.message.answer('Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
         await callback.answer()
 
+    # --- Сотрудник: Я еду (выбор точки посадки) ---
     @dp.message_handler(Text(equals='🙋‍♂️ Я еду'))
     async def i_go(message: types.Message):
-        kb = InlineKeyboardMarkup(row_width=2)
-        for point in ['ПРЦ', 'ОРЛ А', 'КДП', 'РЭМ', 'Город']:
-            kb.add(InlineKeyboardButton(point, callback_data=f'point_{point}'))
-        await message.answer('Выберите точку маршрута:', reply_markup=kb)
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(InlineKeyboardButton('🚌 Автобаза', callback_data='point_Автобаза'))
+        kb.add(InlineKeyboardButton('🏢 КДП', callback_data='point_КДП'))
+        kb.add(InlineKeyboardButton('🏙️ Город', callback_data='point_Город'))
+        await message.answer('Выберите точку посадки:', reply_markup=kb)
 
     @dp.callback_query_handler(lambda c: c.data and c.data.startswith('point_'))
     async def point_selected(callback: types.CallbackQuery):
         point = callback.data.split('_')[1]
         user_id = callback.from_user.id
+        # Проверяем, активен ли трекер (есть ли водитель в пути)
         conn = sqlite3.connect('locator.db')
         cur = conn.cursor()
+        cur.execute("SELECT user_id FROM driver_tracker WHERE is_active = 1 LIMIT 1")
+        driver_active = cur.fetchone()
+        if not driver_active:
+            await callback.message.edit_text('❌ Водитель не в пути. Дождитесь начала маршрута.')
+            conn.close()
+            await callback.answer()
+            return
+        # Сохраняем заявку
         cur.execute('INSERT INTO ride_requests (user_id, pickup_point) VALUES (?, ?)', (user_id, point))
         conn.commit()
+        # Получаем имя сотрудника
+        cur.execute('SELECT first_name, last_name FROM users WHERE user_id = ?', (user_id,))
+        user = cur.fetchone()
         conn.close()
+        if user:
+            user_name = f"{user[0]} {user[1]}"
+            await notify_driver_about_new_request(user_name, point)
         await callback.message.edit_text(f'✅ Заявка на посадку в точке "{point}" создана!')
         await callback.answer()
 
+    # --- Сотрудник: Где водитель? ---
     @dp.message_handler(Text(equals='👀 Где водитель?'))
     async def where_driver(message: types.Message):
         conn = sqlite3.connect('locator.db')
@@ -242,6 +290,28 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('🚫 Водитель сейчас не в пути или не поделился своей геолокацией.')
 
+    # --- Сотрудник: Отменить мою заявку ---
+    @dp.message_handler(Text(equals='❌ Отменить мою заявку'))
+    async def cancel_my_request(message: types.Message):
+        user_id = message.from_user.id
+        conn = sqlite3.connect('locator.db')
+        cur = conn.cursor()
+        cur.execute("SELECT request_id, pickup_point FROM ride_requests WHERE user_id = ? AND status = 'active'", (user_id,))
+        request = cur.fetchone()
+        if request:
+            cur.execute("DELETE FROM ride_requests WHERE request_id = ?", (request[0],))
+            conn.commit()
+            await message.answer(f'❌ Ваша заявка на точку "{request[1]}" отменена.')
+            # Уведомляем водителя
+            cur.execute("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
+            driver = cur.fetchone()
+            if driver:
+                await bot.send_message(driver[0], f"❌ Заявка отменена!\n👤 {message.from_user.first_name} {message.from_user.last_name}\n📍 {request[1]}")
+        else:
+            await message.answer('❌ У вас нет активных заявок.')
+        conn.close()
+
+    # --- Водитель: ручная отправка геолокации ---
     @dp.message_handler(content_types=['location'])
     async def driver_location(message: types.Message):
         user_id = message.from_user.id
@@ -260,6 +330,7 @@ def register_handlers(dp: Dispatcher):
             await message.answer('⛔ Вы не зарегистрированы как водитель.')
         conn.close()
 
+    # --- Водитель: включение Live Location ---
     @dp.message_handler(Text(equals='🟢 Включить Live Location'))
     async def ask_live_location(message: types.Message):
         user_id = message.from_user.id
@@ -269,13 +340,13 @@ def register_handlers(dp: Dispatcher):
         row = cur.fetchone()
         conn.close()
         if row and row[0] == 1:
-            await message.answer('🟢 Локатор уже включён. Остановите текущую трансляцию перед включением новой.')
+            await message.answer('🟢 Локатор уже включён.')
             return
         markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         markup.add(KeyboardButton('📍 Поделиться геолокацией', request_location=True))
         await message.answer(
-            "📍 Пожалуйста, нажмите на кнопку ниже и отправьте ваше текущее местоположение, чтобы начать 2-часовую трансляцию.\n"
-            "После этого заявки сотрудников будут активны.",
+            "📍 Нажмите на кнопку ниже и отправьте ваше текущее местоположение, чтобы начать 2-часовую трансляцию.\n\n"
+            "После этого сотрудники получат уведомление и смогут отправлять заявки.",
             reply_markup=markup
         )
         await LiveLocationStates.waiting_for_location.set()
@@ -302,26 +373,22 @@ def register_handlers(dp: Dispatcher):
         asyncio.create_task(auto_expire_tracker(dp.bot, user_id, expire_time))
         await state.finish()
         await message.answer(
-            "✅ Трансляция вашего местоположения запущена на 2 часа!\n"
-            "Теперь заявки сотрудников будут активны. Вы можете просмотреть их по кнопке '📋 Список заявок'.\n"
-            "Чтобы остановить досрочно, нажмите '🔴 Остановить трансляцию'.",
+            "✅ Трансляция запущена на 2 часа!\n\n"
+            "Сотрудники получили уведомление и могут отправлять заявки.\n"
+            "Вы можете просматривать заявки по кнопке '📋 Список заявок'.",
             reply_markup=get_driver_keyboard()
         )
+        # Отправляем уведомление всем сотрудникам
+        await notify_employees_about_start()
 
+    # --- Водитель: остановка трансляции ---
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
         user_id = message.from_user.id
-        conn = sqlite3.connect('locator.db')
-        cur = conn.cursor()
-        cur.execute('SELECT is_active FROM driver_tracker WHERE user_id = ?', (user_id,))
-        row = cur.fetchone()
-        conn.close()
-        if not row or row[0] != 1:
-            await message.answer("🔴 У вас нет активной трансляции.")
-            return
         await deactivate_tracker(dp.bot, user_id, stop_live=True)
         await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
 
+    # --- Водитель: список заявок ---
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
         user_id = message.from_user.id
@@ -333,33 +400,55 @@ def register_handlers(dp: Dispatcher):
             await message.answer('⛔ Только для водителей.')
             conn.close()
             return
-        cur.execute('SELECT is_active, expire_time FROM driver_tracker WHERE user_id = ?', (user_id,))
-        tracker = cur.fetchone()
-        if not tracker or tracker[0] != 1:
-            await message.answer("🚫 Список заявок доступен только когда активен локатор. Включите Live Location.")
-            conn.close()
-            return
-        expire_time = datetime.fromisoformat(tracker[1])
-        if datetime.now() > expire_time:
-            await deactivate_tracker(dp.bot, user_id, stop_live=False)
-            await message.answer("⏰ Время действия локатора истекло. Заявки сброшены. Включите Live Location заново.")
-            conn.close()
-            return
         cur.execute('''
             SELECT ride_requests.request_id, users.first_name, users.last_name, ride_requests.pickup_point, ride_requests.created_at
             FROM ride_requests
             JOIN users ON ride_requests.user_id = users.user_id
             WHERE ride_requests.status = 'active'
-            ORDER BY ride_requests.created_at DESC
+            ORDER BY 
+                CASE ride_requests.pickup_point
+                    WHEN 'Автобаза' THEN 1
+                    WHEN 'КДП' THEN 2
+                    WHEN 'Город' THEN 3
+                END,
+                ride_requests.created_at ASC
         ''')
         rows = cur.fetchall()
         conn.close()
         if not rows:
             await message.answer('📭 Нет активных заявок.')
             return
-        text = "📋 *Активные заявки:*\n\n"
+        text = "📋 *Активные заявки (в порядке маршрута):*\n\n"
         for req_id, first_name, last_name, point, created in rows:
-            text += f"👤 {first_name} {last_name}\n📍 Точка: {point}\n🕒 {created}\n---\n"
+            text += f"👤 {first_name} {last_name}\n📍 {point}\n🕒 {created}\n---\n"
+        await message.answer(text, parse_mode='Markdown')
+
+    # --- Водитель: статистика (кто едет) ---
+    @dp.message_handler(Text(equals='📊 Кто едет?'))
+    async def show_stats(message: types.Message):
+        conn = sqlite3.connect('locator.db')
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT pickup_point, COUNT(*), GROUP_CONCAT(first_name || " " || last_name, ", ")
+            FROM ride_requests
+            JOIN users ON ride_requests.user_id = users.user_id
+            WHERE status = 'active'
+            GROUP BY pickup_point
+            ORDER BY 
+                CASE pickup_point
+                    WHEN 'Автобаза' THEN 1
+                    WHEN 'КДП' THEN 2
+                    WHEN 'Город' THEN 3
+                END
+        ''')
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            await message.answer('📭 Нет активных заявок.')
+            return
+        text = "📊 *Кто едет:*\n\n"
+        for point, count, names in rows:
+            text += f"*{point}*: {count} чел.\n👥 {names}\n\n"
         await message.answer(text, parse_mode='Markdown')
 
     @dp.message_handler(Text(equals='Отмена'))
@@ -371,26 +460,22 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Самопинг (чтобы бот не засыпал) ---
-async def ping_self():
-    public_url = os.getenv('RENDER_EXTERNAL_URL')
-    if not public_url:
-        return
-    url = f"{public_url}/health"
-    try:
-        async with aiohttp.ClientSession() as session:
-            await session.get(url, timeout=10)
-    except:
-        pass
-
-def run_self_pinger():
+# --- Запуск бота в потоке (polling) ---
+def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    async def pinger():
-        while True:
-            await asyncio.sleep(600)
-            await ping_self()
-    loop.run_until_complete(pinger())
+    bot = Bot(token=BOT_TOKEN)
+    storage = MemoryStorage()
+    dp = Dispatcher(bot, storage=storage)
+    dp.middleware.setup(LoggingMiddleware())
+    register_handlers(dp)
+    init_db()
+    executor.start_polling(dp, skip_updates=True)
+
+def start_bot_thread():
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
 
 # --- Flask для health check ---
 app = Flask(__name__)
@@ -403,46 +488,8 @@ def index():
 def health():
     return "OK", 200
 
-# --- Запуск бота через вебхук ---
-def run_bot_with_webhook():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    bot = Bot(token=BOT_TOKEN)
-    storage = MemoryStorage()
-    dp = Dispatcher(bot, storage=storage)
-    dp.middleware.setup(LoggingMiddleware())
-    register_handlers(dp)
-    init_db()
-    
-    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-    WEBHOOK_URL = f"{os.getenv('RENDER_EXTERNAL_URL')}{WEBHOOK_PATH}"
-    
-    async def on_startup(dp):
-        await bot.set_webhook(WEBHOOK_URL)
-    
-    async def on_shutdown(dp):
-        await bot.delete_webhook()
-    
-    start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True,
-        host='0.0.0.0',
-        port=int(os.environ.get('PORT', 10000))
-    )
-
+# --- Запуск ---
 if __name__ == '__main__':
-    # Запускаем самопингер
-    pinger_thread = threading.Thread(target=run_self_pinger, daemon=True)
-    pinger_thread.start()
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot_with_webhook, daemon=True)
-    bot_thread.start()
-    
-    # Запускаем Flask
-    port = int(os.environ.get("PORT", 10000))
+    start_bot_thread()
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
