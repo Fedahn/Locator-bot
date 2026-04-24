@@ -179,6 +179,23 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer(welcome_text, parse_mode='Markdown', reply_markup=get_start_keyboard())
 
+    # --- КОМАНДА ДЛЯ СБРОСА ПОЛЬЗОВАТЕЛЯ ---
+    @dp.message_handler(commands=['resetme'])
+    async def reset_user(message: types.Message):
+        user_id = message.from_user.id
+        conn = await get_connection()
+        await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM ride_requests WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM driver_locations WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM driver_tracker WHERE user_id = $1", user_id)
+        await conn.close()
+        await message.answer(
+            "✅ *Ваши данные удалены!*\n\n"
+            "Теперь вы можете заново пройти регистрацию, отправив команду /start",
+            parse_mode='Markdown',
+            reply_markup=get_start_keyboard()
+        )
+
     @dp.message_handler(Text(equals='▶️ Начать'))
     async def start_button(message: types.Message):
         user_id = message.from_user.id
@@ -444,21 +461,16 @@ def register_handlers(dp: Dispatcher):
 
 # --- Запуск с автоматическим сбросом вебхука и очисткой БД ---
 async def on_startup(dp):
-    # 1. Удаляем старый вебхук
     await bot.delete_webhook()
     logging.info("⏹️ Old webhook deleted")
     
-    # 2. Пауза для Telegram
     await asyncio.sleep(2)
     
-    # 3. Очищаем базу данных (заявки, трекеры, геолокации)
     await clear_db()
     logging.info("🗑️ Database cleared")
     
-    # 4. Создаём таблицы (если их нет)
     await init_db()
     
-    # 5. Устанавливаем новый вебхук
     webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
     await bot.set_webhook(webhook_url)
     logging.info(f"✅ Webhook set to {webhook_url}")
@@ -479,4 +491,4 @@ if __name__ == '__main__':
         on_shutdown=on_shutdown,
         host='0.0.0.0',
         port=int(os.environ.get("PORT", 10000))
-    )
+)
