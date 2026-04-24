@@ -19,12 +19,13 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 # === НАСТРОЙКИ ===
 GROUP_CHAT_ID = -1003593347493
-ADMIN_IDS = [994960688]
+ADMIN_IDS = [994960688]  # Ваш Telegram ID
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
+dp.middleware.setup(LoggingMiddleware())
 
 # --- Состояния ---
 class Registration(StatesGroup):
@@ -38,50 +39,45 @@ temp_user_data = {}
 
 # --- База данных (PostgreSQL) ---
 async def init_db():
-    try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                telegram_username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                role TEXT CHECK(role IN ('employee', 'driver'))
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS ride_requests (
-                request_id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                pickup_point TEXT CHECK(pickup_point IN ('Автобаза', 'КДП', 'Город')),
-                status TEXT DEFAULT 'active',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS driver_locations (
-                user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
-                latitude REAL,
-                longitude REAL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS driver_tracker (
-                user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
-                is_active INTEGER DEFAULT 0,
-                start_time TIMESTAMP,
-                expire_time TIMESTAMP,
-                live_message_id BIGINT,
-                live_chat_id BIGINT
-            )
-        ''')
-        await conn.close()
-        logging.info("Database initialized successfully")
-        return True
-    except Exception as e:
-        logging.error(f"Database init failed: {e}")
-        return False
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            telegram_username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            role TEXT CHECK(role IN ('employee', 'driver'))
+        )
+    ''')
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS ride_requests (
+            request_id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(user_id),
+            pickup_point TEXT CHECK(pickup_point IN ('Автобаза', 'КДП', 'Город')),
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS driver_locations (
+            user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+            latitude REAL,
+            longitude REAL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS driver_tracker (
+            user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+            is_active INTEGER DEFAULT 0,
+            start_time TIMESTAMP,
+            expire_time TIMESTAMP,
+            live_message_id BIGINT,
+            live_chat_id BIGINT
+        )
+    ''')
+    await conn.close()
+    logging.info("Database initialized")
 
 async def get_connection():
     return await asyncpg.connect(DATABASE_URL)
@@ -117,7 +113,6 @@ def get_admin_keyboard():
     kb.add(KeyboardButton('🔙 Выйти из админ-панели'))
     return kb
 
-# --- Вспомогательные функции ---
 async def notify_driver_about_new_request(user_name, pickup_point):
     conn = await get_connection()
     driver = await conn.fetchrow("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
@@ -141,7 +136,7 @@ async def deactivate_tracker(user_id: int, stop_live: bool = True):
     await conn.execute("DELETE FROM ride_requests WHERE status = 'active'")
     await conn.execute("DELETE FROM driver_locations WHERE user_id = $1", user_id)
     await conn.close()
-    logging.info(f"Tracker deactivated for user {user_id}")
+    logging.info(f"Tracker deactivated")
 
 async def auto_expire_tracker(user_id: int, expire_time: datetime):
     delay = (expire_time - datetime.now()).total_seconds()
@@ -155,16 +150,20 @@ async def auto_expire_tracker(user_id: int, expire_time: datetime):
 def register_handlers(dp: Dispatcher):
     temp_user_data = {}
 
+    # --- Админ-панель ---
     @dp.message_handler(commands=['admin'])
     async def admin_panel(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS:
+        user_id = message.from_user.id
+        if user_id not in ADMIN_IDS:
             await message.answer('⛔ У вас нет доступа к админ-панели.')
             return
         await message.answer('🔐 *Админ-панель*\n\nВыберите действие:', parse_mode='Markdown', reply_markup=get_admin_keyboard())
 
     @dp.message_handler(Text(equals='🗑️ Очистить все заявки'))
     async def admin_clear_requests(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         await conn.execute("DELETE FROM ride_requests")
         await conn.close()
@@ -172,7 +171,9 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message_handler(Text(equals='👥 Очистить всех пользователей'))
     async def admin_clear_users(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         await conn.execute("DELETE FROM users")
         await conn.execute("DELETE FROM ride_requests")
@@ -183,26 +184,32 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message_handler(Text(equals='🗄️ Очистить всё (кроме пользователей)'))
     async def admin_clear_all(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         await conn.execute("DELETE FROM ride_requests")
         await conn.execute("DELETE FROM driver_locations")
         await conn.execute("DELETE FROM driver_tracker")
         await conn.close()
-        await message.answer('✅ Данные (заявки, трекеры) очищены, пользователи сохранены.', reply_markup=get_admin_keyboard())
-    
+        await message.answer('✅ Данные очищены, пользователи сохранены.', reply_markup=get_admin_keyboard())
+
     @dp.message_handler(Text(equals='➕ Добавить тестовую заявку'))
     async def admin_add_test_request(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         await conn.execute("INSERT INTO ride_requests (user_id, pickup_point, status) VALUES ($1, $2, $3)",
-                          (994960688, 'Автобаза', 'active'))
+                          994960688, 'Автобаза', 'active')
         await conn.close()
         await message.answer('✅ Тестовая заявка на точку "Автобаза" добавлена!', reply_markup=get_admin_keyboard())
 
     @dp.message_handler(Text(equals='📊 Статистика БД'))
     async def admin_stats(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
         active_requests = await conn.fetchval("SELECT COUNT(*) FROM ride_requests WHERE status = 'active'")
@@ -216,7 +223,9 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message_handler(Text(equals='🔙 Выйти из админ-панели'))
     async def admin_exit(message: types.Message):
-        if message.from_user.id not in ADMIN_IDS: return
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer('⛔ Доступ запрещён.')
+            return
         conn = await get_connection()
         user = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1", message.from_user.id)
         await conn.close()
@@ -239,11 +248,11 @@ def register_handlers(dp: Dispatcher):
         if user:
             role = user['role']
             if role == 'employee':
-                await message.answer('👋 Вы сотрудник.', reply_markup=get_employee_keyboard())
+                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
             else:
-                await message.answer('👋 Вы водитель.', reply_markup=get_driver_keyboard())
+                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
         else:
-            await message.answer('Давайте зарегистрируемся. Введите ваше имя:', reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
+            await message.answer('Добро пожаловать! Давайте зарегистрируемся. Введите ваше имя:', reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
             await Registration.first_name.set()
 
     @dp.message_handler(state=Registration.first_name)
@@ -253,7 +262,7 @@ def register_handlers(dp: Dispatcher):
             await message.answer('Регистрация отменена.', reply_markup=get_start_keyboard())
             return
         await state.update_data(first_name=message.text)
-        await message.answer('Введите фамилию:')
+        await message.answer('Спасибо! Теперь введите вашу фамилию:')
         await Registration.last_name.set()
 
     @dp.message_handler(state=Registration.last_name)
@@ -286,13 +295,13 @@ def register_handlers(dp: Dispatcher):
         username = user.get('telegram_username', '')
         conn = await get_connection()
         await conn.execute("INSERT INTO users (user_id, telegram_username, first_name, last_name, role) VALUES ($1, $2, $3, $4, $5)",
-                          (user_id, username, first_name, last_name, role))
+                          user_id, username, first_name, last_name, role)
         await conn.close()
-        await callback.message.edit_text('✅ Регистрация завершена!')
+        await callback.message.edit_text('✅ Регистрация успешно завершена!')
         if role == 'employee':
-            await callback.message.answer('Вы сотрудник.', reply_markup=get_employee_keyboard())
+            await callback.message.answer('Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
         else:
-            await callback.message.answer('Вы водитель.', reply_markup=get_driver_keyboard())
+            await callback.message.answer('Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
         await callback.answer()
 
     # --- Сотрудник: Я еду ---
@@ -311,17 +320,18 @@ def register_handlers(dp: Dispatcher):
         conn = await get_connection()
         driver_active = await conn.fetchrow("SELECT user_id FROM driver_tracker WHERE is_active = 1 LIMIT 1")
         if not driver_active:
-            await callback.message.edit_text('❌ Водитель не в пути.')
+            await callback.message.edit_text('❌ Водитель не в пути. Дождитесь начала маршрута.')
             await conn.close()
             await callback.answer()
             return
-        await conn.execute("INSERT INTO ride_requests (user_id, pickup_point) VALUES ($1, $2)", (user_id, point))
+        await conn.execute("INSERT INTO ride_requests (user_id, pickup_point) VALUES ($1, $2)",
+                          user_id, point)
         user = await conn.fetchrow("SELECT first_name, last_name FROM users WHERE user_id = $1", user_id)
         await conn.close()
         if user:
             user_name = f"{user['first_name']} {user['last_name']}"
             await notify_driver_about_new_request(user_name, point)
-        await callback.message.edit_text(f'✅ Заявка на "{point}" создана!')
+        await callback.message.edit_text(f'✅ Заявка на посадку в точке "{point}" создана!')
         await callback.answer()
 
     # --- Сотрудник: Где водитель? ---
@@ -333,7 +343,7 @@ def register_handlers(dp: Dispatcher):
         if loc and loc['latitude'] is not None:
             await message.answer_location(latitude=loc['latitude'], longitude=loc['longitude'])
         else:
-            await message.answer('🚫 Водитель не в пути.')
+            await message.answer('🚫 Водитель сейчас не в пути или не поделился своей геолокацией.')
 
     # --- Сотрудник: Отменить мою заявку ---
     @dp.message_handler(Text(equals='❌ Отменить мою заявку'))
@@ -343,12 +353,12 @@ def register_handlers(dp: Dispatcher):
         request = await conn.fetchrow("SELECT request_id, pickup_point FROM ride_requests WHERE user_id = $1 AND status = 'active'", user_id)
         if request:
             await conn.execute("DELETE FROM ride_requests WHERE request_id = $1", request['request_id'])
-            await message.answer(f'❌ Заявка на "{request["pickup_point"]}" отменена.')
+            await message.answer(f'❌ Ваша заявка на точку "{request["pickup_point"]}" отменена.')
             driver = await conn.fetchrow("SELECT user_id FROM users WHERE role = 'driver' LIMIT 1")
             if driver:
                 await bot.send_message(driver['user_id'], f"❌ Заявка отменена!\n👤 {message.from_user.first_name} {message.from_user.last_name}\n📍 {request['pickup_point']}")
         else:
-            await message.answer('❌ Нет активных заявок.')
+            await message.answer('❌ У вас нет активных заявок.')
         await conn.close()
 
     # --- Водитель: ручная отправка геолокации ---
@@ -360,13 +370,14 @@ def register_handlers(dp: Dispatcher):
         conn = await get_connection()
         user = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1", user_id)
         if user and user['role'] == 'driver':
-            await conn.execute("INSERT INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO UPDATE SET latitude = $2, longitude = $3, updated_at = CURRENT_TIMESTAMP", (user_id, lat, lon))
-            await message.answer('✅ Геолокация обновлена!', reply_markup=get_driver_keyboard())
+            await conn.execute("INSERT INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO UPDATE SET latitude = $2, longitude = $3, updated_at = CURRENT_TIMESTAMP",
+                              user_id, lat, lon)
+            await message.answer('✅ Ваша геолокация обновлена!', reply_markup=get_driver_keyboard())
         else:
-            await message.answer('⛔ Вы не водитель.')
+            await message.answer('⛔ Вы не зарегистрированы как водитель.')
         await conn.close()
 
-    # --- Водитель: Live Location ---
+    # --- Водитель: включение Live Location ---
     @dp.message_handler(Text(equals='🟢 Включить Live Location'))
     async def ask_live_location(message: types.Message):
         user_id = message.from_user.id
@@ -378,7 +389,11 @@ def register_handlers(dp: Dispatcher):
             return
         markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         markup.add(KeyboardButton('📍 Поделиться геолокацией', request_location=True))
-        await message.answer("📍 Нажмите кнопку и отправьте геолокацию:", reply_markup=markup)
+        await message.answer(
+            "📍 Нажмите на кнопку ниже и отправьте ваше текущее местоположение, чтобы начать 2-часовую трансляцию.\n\n"
+            "После этого сотрудники получат уведомление и смогут отправлять заявки.",
+            reply_markup=markup
+        )
         await LiveLocationStates.waiting_for_location.set()
 
     @dp.message_handler(content_types=['location'], state=LiveLocationStates.waiting_for_location)
@@ -387,26 +402,28 @@ def register_handlers(dp: Dispatcher):
         lat = message.location.latitude
         lon = message.location.longitude
         conn = await get_connection()
-        await conn.execute("INSERT INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO UPDATE SET latitude = $2, longitude = $3, updated_at = CURRENT_TIMESTAMP", (user_id, lat, lon))
+        await conn.execute("INSERT INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO UPDATE SET latitude = $2, longitude = $3, updated_at = CURRENT_TIMESTAMP",
+                          user_id, lat, lon)
         await conn.close()
         await message.delete()
         live_message = await bot.send_location(chat_id=GROUP_CHAT_ID, latitude=lat, longitude=lon, live_period=7200)
         expire_time = datetime.now() + timedelta(seconds=7200)
         conn = await get_connection()
-        await conn.execute("INSERT INTO driver_tracker (user_id, is_active, start_time, expire_time, live_message_id, live_chat_id) VALUES ($1, 1, $2, $3, $4, $5) ON CONFLICT (user_id) DO UPDATE SET is_active = 1, start_time = $2, expire_time = $3, live_message_id = $4, live_chat_id = $5", (user_id, datetime.now(), expire_time, live_message.message_id, live_message.chat.id))
+        await conn.execute("INSERT INTO driver_tracker (user_id, is_active, start_time, expire_time, live_message_id, live_chat_id) VALUES ($1, 1, $2, $3, $4, $5) ON CONFLICT (user_id) DO UPDATE SET is_active = 1, start_time = $2, expire_time = $3, live_message_id = $4, live_chat_id = $5",
+                          user_id, datetime.now(), expire_time, live_message.message_id, live_message.chat.id)
         await conn.close()
         asyncio.create_task(auto_expire_tracker(user_id, expire_time))
         await state.finish()
-        await message.answer("✅ Трансляция на 2 часа!", reply_markup=get_driver_keyboard())
+        await message.answer("✅ Трансляция запущена на 2 часа!", reply_markup=get_driver_keyboard())
         await bot.send_message(GROUP_CHAT_ID, "🚌 Водитель начал маршрут! Отправляйте заявки в личку боту.", parse_mode='Markdown')
 
     # --- Водитель: остановка трансляции ---
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
         await deactivate_tracker(message.from_user.id, stop_live=True)
-        await message.answer("🔴 Трансляция остановлена.", reply_markup=get_driver_keyboard())
+        await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
 
-    # --- Список заявок для водителя ---
+    # --- Водитель: список заявок ---
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
         user_id = message.from_user.id
@@ -416,30 +433,55 @@ def register_handlers(dp: Dispatcher):
             await message.answer('⛔ Только для водителей.')
             await conn.close()
             return
-        rows = await conn.fetch('SELECT users.first_name, users.last_name, ride_requests.pickup_point, ride_requests.created_at FROM ride_requests JOIN users ON ride_requests.user_id = users.user_id WHERE ride_requests.status = "active" ORDER BY CASE ride_requests.pickup_point WHEN "Автобаза" THEN 1 WHEN "КДП" THEN 2 WHEN "Город" THEN 3 END, ride_requests.created_at ASC')
+        rows = await conn.fetch('''
+            SELECT users.first_name, users.last_name, ride_requests.pickup_point, ride_requests.created_at
+            FROM ride_requests
+            JOIN users ON ride_requests.user_id = users.user_id
+            WHERE ride_requests.status = 'active'
+            ORDER BY 
+                CASE ride_requests.pickup_point
+                    WHEN 'Автобаза' THEN 1
+                    WHEN 'КДП' THEN 2
+                    WHEN 'Город' THEN 3
+                END,
+                ride_requests.created_at ASC
+        ''')
         await conn.close()
         if not rows:
-            await message.answer('📭 Нет заявок.')
+            await message.answer('📭 Нет активных заявок.')
             return
-        text = "📋 *Активные заявки:*\n\n"
+        text = "📋 *Активные заявки (в порядке маршрута):*\n\n"
         for row in rows:
             text += f"👤 {row['first_name']} {row['last_name']}\n📍 {row['pickup_point']}\n🕒 {row['created_at']}\n---\n"
         await message.answer(text, parse_mode='Markdown')
 
-    # --- Статистика для водителя ---
+    # --- Водитель: статистика ---
     @dp.message_handler(Text(equals='📊 Кто едет?'))
     async def show_stats(message: types.Message):
         conn = await get_connection()
-        rows = await conn.fetch('SELECT pickup_point, COUNT(*), STRING_AGG(first_name || " " || last_name, ", ") as names FROM ride_requests JOIN users ON ride_requests.user_id = users.user_id WHERE status = "active" GROUP BY pickup_point ORDER BY CASE pickup_point WHEN "Автобаза" THEN 1 WHEN "КДП" THEN 2 WHEN "Город" THEN 3 END')
+        rows = await conn.fetch('''
+            SELECT pickup_point, COUNT(*), STRING_AGG(first_name || ' ' || last_name, ', ') as names
+            FROM ride_requests
+            JOIN users ON ride_requests.user_id = users.user_id
+            WHERE status = 'active'
+            GROUP BY pickup_point
+            ORDER BY 
+                CASE pickup_point
+                    WHEN 'Автобаза' THEN 1
+                    WHEN 'КДП' THEN 2
+                    WHEN 'Город' THEN 3
+                END
+        ''')
         await conn.close()
         if not rows:
-            await message.answer('📭 Нет заявок.')
+            await message.answer('📭 Нет активных заявок.')
             return
         text = "📊 *Кто едет:*\n\n"
         for row in rows:
             text += f"*{row['pickup_point']}*: {row['count']} чел.\n👥 {row['names']}\n\n"
         await message.answer(text, parse_mode='Markdown')
 
+    # --- Отмена при регистрации ---
     @dp.message_handler(Text(equals='Отмена'))
     async def cancel_registration(message: types.Message, state: FSMContext):
         current_state = await state.get_state()
@@ -447,7 +489,7 @@ def register_handlers(dp: Dispatcher):
             await state.finish()
             await message.answer('Действие отменено.', reply_markup=get_start_keyboard())
         else:
-            await message.answer('Нет активного действия.')
+            await message.answer('Нет активного действия для отмены.')
 
 # --- Запуск ---
 async def on_startup(dp):
@@ -458,6 +500,8 @@ async def on_startup(dp):
 
 async def on_shutdown(dp):
     await bot.delete_webhook()
+    await dp.storage.close()
+    await dp.storage.wait_closed()
 
 if __name__ == '__main__':
     register_handlers(dp)
@@ -468,4 +512,4 @@ if __name__ == '__main__':
         on_shutdown=on_shutdown,
         host='0.0.0.0',
         port=int(os.environ.get("PORT", 10000))
-  )
+    )
