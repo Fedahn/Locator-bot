@@ -1,5 +1,4 @@
 aiogram==2.25.1
 python-dotenv
-flask
 asyncpg
 psycopg2-binary
