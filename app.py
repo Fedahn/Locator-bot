@@ -86,20 +86,23 @@ def get_start_keyboard():
     kb.add(KeyboardButton('▶️ Начать'))
     return kb
 
-def get_employee_keyboard():
+def get_main_menu(role=None):
+    """Главное меню после регистрации"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('🙋‍♂️ Я еду'))
-    kb.add(KeyboardButton('👀 Где водитель?'))
-    kb.add(KeyboardButton('❌ Отменить мою заявку'))
-    return kb
-
-def get_driver_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('📍 Отправить мою геолокацию'))
-    kb.add(KeyboardButton('📋 Список заявок'))
-    kb.add(KeyboardButton('📊 Кто едет?'))
-    kb.add(KeyboardButton('🟢 Включить Live Location'))
-    kb.add(KeyboardButton('🔴 Остановить трансляцию'))
+    if role == 'employee':
+        kb.add(KeyboardButton('🙋‍♂️ Я еду'))
+        kb.add(KeyboardButton('👀 Где водитель?'))
+        kb.add(KeyboardButton('❌ Отменить мою заявку'))
+        kb.add(KeyboardButton('🔄 Сменить роль'))
+    elif role == 'driver':
+        kb.add(KeyboardButton('📍 Отправить мою геолокацию'))
+        kb.add(KeyboardButton('📋 Список заявок'))
+        kb.add(KeyboardButton('📊 Кто едет?'))
+        kb.add(KeyboardButton('🟢 Включить Live Location'))
+        kb.add(KeyboardButton('🔴 Остановить трансляцию'))
+        kb.add(KeyboardButton('🔄 Сменить роль'))
+    else:
+        kb.add(KeyboardButton('▶️ Начать'))
     return kb
 
 async def notify_driver_about_new_request(user_name, pickup_point):
@@ -132,31 +135,56 @@ async def auto_expire_tracker(user_id: int, expire_time: datetime):
     if delay > 0:
         await asyncio.sleep(delay)
     await deactivate_tracker(user_id, stop_live=True)
-    await bot.send_message(user_id, "⏰ 2-часовой локатор истёк. Заявки сброшены.", reply_markup=get_driver_keyboard())
+    await bot.send_message(user_id, "⏰ 2-часовой локатор истёк. Заявки сброшены.")
     await bot.send_message(GROUP_CHAT_ID, "⏰ Трансляция местоположения завершена. Заявки сброшены.")
 
 # --- Хендлеры ---
 def register_handlers(dp: Dispatcher):
     temp_user_data = {}
 
-    @dp.message_handler(Text(equals='▶️ Начать'))
-    async def start_button(message: types.Message):
-        await cmd_start(message)
-
+    # --- Приветствие и кнопка Начать ---
     @dp.message_handler(commands=['start'])
     async def cmd_start(message: types.Message):
         user_id = message.from_user.id
         conn = await get_connection()
         user = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1", user_id)
         await conn.close()
+        
+        welcome_text = (
+            "👋 *Добро пожаловать в бот Локатор!*\n\n"
+            "Я помогу водителю автобуса узнавать, кто и где хочет сесть, "
+            "а сотрудникам — быстро отправлять заявки.\n\n"
+            "📍 *Как это работает:*\n"
+            "• Водитель включает Live Location\n"
+            "• Сотрудники отправляют заявки\n"
+            "• Водитель видит список желающих\n\n"
+            "👇 *Чтобы начать, нажмите кнопку «Начать»*"
+        )
+        
         if user:
             role = user['role']
-            if role == 'employee':
-                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
-            else:
-                await message.answer('👋 Добро пожаловать! Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
+            await message.answer(
+                f"👋 С возвращением! Вы зарегистрированы как {'сотрудник' if role == 'employee' else 'водитель'}.", 
+                reply_markup=get_main_menu(role)
+            )
         else:
-            await message.answer('Добро пожаловать! Давайте зарегистрируемся. Введите ваше имя:', reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
+            await message.answer(welcome_text, parse_mode='Markdown', reply_markup=get_start_keyboard())
+
+    @dp.message_handler(Text(equals='▶️ Начать'))
+    async def start_button(message: types.Message):
+        user_id = message.from_user.id
+        conn = await get_connection()
+        user = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1", user_id)
+        await conn.close()
+        
+        if user:
+            role = user['role']
+            await message.answer(
+                f"👋 Вы уже зарегистрированы как {'сотрудник' if role == 'employee' else 'водитель'}.",
+                reply_markup=get_main_menu(role)
+            )
+        else:
+            await message.answer("Давайте зарегистрируемся! Введите ваше имя:", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Отмена')))
             await Registration.first_name.set()
 
     @dp.message_handler(state=Registration.first_name)
@@ -202,11 +230,37 @@ def register_handlers(dp: Dispatcher):
                            user_id, username, first_name, last_name, role)
         await conn.close()
         await callback.message.edit_text('✅ Регистрация успешно завершена!')
-        if role == 'employee':
-            await callback.message.answer('Вы зарегистрированы как сотрудник.', reply_markup=get_employee_keyboard())
-        else:
-            await callback.message.answer('Вы зарегистрированы как водитель.', reply_markup=get_driver_keyboard())
+        await callback.message.answer(
+            f'Вы зарегистрированы как {"сотрудник" if role == "employee" else "водитель"}.',
+            reply_markup=get_main_menu(role)
+        )
         await callback.answer()
+
+    # --- Смена роли ---
+    @dp.message_handler(Text(equals='🔄 Сменить роль'))
+    async def change_role(message: types.Message):
+        user_id = message.from_user.id
+        conn = await get_connection()
+        user = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1", user_id)
+        if user:
+            current_role = user['role']
+            new_role = 'driver' if current_role == 'employee' else 'employee'
+            
+            # Обновляем роль в базе данных
+            await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2", new_role, user_id)
+            
+            # Очищаем все заявки пользователя при смене роли
+            await conn.execute("DELETE FROM ride_requests WHERE user_id = $1", user_id)
+            
+            role_text = "водитель" if new_role == 'driver' else "сотрудник"
+            await message.answer(
+                f'✅ Ваша роль изменена на "{role_text}".\n\n'
+                f'Теперь вам доступно соответствующее меню.',
+                reply_markup=get_main_menu(new_role)
+            )
+        else:
+            await message.answer('❌ Пользователь не найден. Пожалуйста, пройдите регистрацию через /start')
+        await conn.close()
 
     @dp.message_handler(Text(equals='🙋‍♂️ Я еду'))
     async def i_go(message: types.Message):
@@ -271,7 +325,7 @@ def register_handlers(dp: Dispatcher):
         if user and user['role'] == 'driver':
             await conn.execute("INSERT INTO driver_locations (user_id, latitude, longitude, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO UPDATE SET latitude = $2, longitude = $3, updated_at = CURRENT_TIMESTAMP",
                                user_id, lat, lon)
-            await message.answer('✅ Ваша геолокация обновлена!', reply_markup=get_driver_keyboard())
+            await message.answer('✅ Ваша геолокация обновлена!', reply_markup=get_main_menu('driver'))
         else:
             await message.answer('⛔ Вы не зарегистрированы как водитель.')
         await conn.close()
@@ -312,13 +366,13 @@ def register_handlers(dp: Dispatcher):
         await conn.close()
         asyncio.create_task(auto_expire_tracker(user_id, expire_time))
         await state.finish()
-        await message.answer("✅ Трансляция запущена на 2 часа!", reply_markup=get_driver_keyboard())
+        await message.answer("✅ Трансляция запущена на 2 часа!", reply_markup=get_main_menu('driver'))
         await bot.send_message(GROUP_CHAT_ID, "🚌 Водитель начал маршрут! Отправляйте заявки в личку боту.", parse_mode='Markdown')
 
     @dp.message_handler(Text(equals='🔴 Остановить трансляцию'))
     async def stop_live_location(message: types.Message):
         await deactivate_tracker(message.from_user.id, stop_live=True)
-        await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_driver_keyboard())
+        await message.answer("🔴 Трансляция остановлена. Все заявки сброшены.", reply_markup=get_main_menu('driver'))
 
     @dp.message_handler(Text(equals='📋 Список заявок'))
     async def show_requests(message: types.Message):
@@ -406,4 +460,4 @@ if __name__ == '__main__':
         on_shutdown=on_shutdown,
         host='0.0.0.0',
         port=int(os.environ.get("PORT", 10000))
-        )
+    )
