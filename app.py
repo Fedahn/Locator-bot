@@ -38,6 +38,7 @@ temp_user_data = {}
 
 # --- База данных ---
 async def init_db():
+    """Создаёт таблицы, если их нет"""
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -76,7 +77,16 @@ async def init_db():
         )
     ''')
     await conn.close()
-    logging.info("Database initialized")
+    logging.info("✅ Database tables created")
+
+async def clear_db():
+    """Очищает все данные (заявки, трекеры, геолокации), но оставляет пользователей"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM ride_requests")
+    await conn.execute("DELETE FROM driver_tracker")
+    await conn.execute("DELETE FROM driver_locations")
+    await conn.close()
+    logging.info("🗑️ Database cleared (ride_requests, driver_tracker, driver_locations)")
 
 async def get_connection():
     return await asyncpg.connect(DATABASE_URL)
@@ -128,7 +138,7 @@ async def deactivate_tracker(user_id: int, stop_live: bool = True):
     await conn.execute("DELETE FROM ride_requests WHERE status = 'active'")
     await conn.execute("DELETE FROM driver_locations WHERE user_id = $1", user_id)
     await conn.close()
-    logging.info(f"Tracker deactivated")
+    logging.info(f"Tracker deactivated for user {user_id}")
 
 async def auto_expire_tracker(user_id: int, expire_time: datetime):
     delay = (expire_time - datetime.now()).total_seconds()
@@ -142,7 +152,6 @@ async def auto_expire_tracker(user_id: int, expire_time: datetime):
 def register_handlers(dp: Dispatcher):
     temp_user_data = {}
 
-    # --- Приветствие и кнопка Начать ---
     @dp.message_handler(commands=['start'])
     async def cmd_start(message: types.Message):
         user_id = message.from_user.id
@@ -236,7 +245,6 @@ def register_handlers(dp: Dispatcher):
         )
         await callback.answer()
 
-    # --- Смена роли ---
     @dp.message_handler(Text(equals='🔄 Сменить роль'))
     async def change_role(message: types.Message):
         user_id = message.from_user.id
@@ -245,13 +253,8 @@ def register_handlers(dp: Dispatcher):
         if user:
             current_role = user['role']
             new_role = 'driver' if current_role == 'employee' else 'employee'
-            
-            # Обновляем роль в базе данных
             await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2", new_role, user_id)
-            
-            # Очищаем все заявки пользователя при смене роли
             await conn.execute("DELETE FROM ride_requests WHERE user_id = $1", user_id)
-            
             role_text = "водитель" if new_role == 'driver' else "сотрудник"
             await message.answer(
                 f'✅ Ваша роль изменена на "{role_text}".\n\n'
@@ -439,17 +442,33 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Запуск ---
+# --- Запуск с автоматическим сбросом вебхука и очисткой БД ---
 async def on_startup(dp):
+    # 1. Удаляем старый вебхук
+    await bot.delete_webhook()
+    logging.info("⏹️ Old webhook deleted")
+    
+    # 2. Пауза для Telegram
+    await asyncio.sleep(2)
+    
+    # 3. Очищаем базу данных (заявки, трекеры, геолокации)
+    await clear_db()
+    logging.info("🗑️ Database cleared")
+    
+    # 4. Создаём таблицы (если их нет)
     await init_db()
+    
+    # 5. Устанавливаем новый вебхук
     webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
     await bot.set_webhook(webhook_url)
-    logging.info(f"Webhook set to {webhook_url}")
+    logging.info(f"✅ Webhook set to {webhook_url}")
 
 async def on_shutdown(dp):
     await bot.delete_webhook()
     await dp.storage.close()
     await dp.storage.wait_closed()
+    await bot.close()
+    logging.info("🤖 Bot stopped")
 
 if __name__ == '__main__':
     register_handlers(dp)
