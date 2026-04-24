@@ -491,6 +491,18 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
+@dp.message_handler(commands=['iam'])
+async def i_am(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or 'unknown'
+    first_name = message.from_user.first_name or 'User'
+    last_name = message.from_user.last_name or ''
+    conn = await get_connection()
+    await conn.execute("INSERT INTO users (user_id, telegram_username, first_name, last_name, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) DO NOTHING",
+                       user_id, username, first_name, last_name, 'driver')
+    await conn.close()
+    await message.answer("✅ Вы добавлены в базу данных как водитель!")
+
 # --- Запуск ---
 async def on_startup(dp):
     await init_db()
