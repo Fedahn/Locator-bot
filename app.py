@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
@@ -38,7 +39,6 @@ temp_user_data = {}
 
 # --- База данных ---
 async def init_db():
-    """Создаёт таблицы, если их нет"""
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -77,16 +77,15 @@ async def init_db():
         )
     ''')
     await conn.close()
-    logging.info("✅ Database tables created")
+    logging.info("✅ Database initialized")
 
 async def clear_db():
-    """Очищает все данные (заявки, трекеры, геолокации), но оставляет пользователей"""
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("DELETE FROM ride_requests")
     await conn.execute("DELETE FROM driver_tracker")
     await conn.execute("DELETE FROM driver_locations")
     await conn.close()
-    logging.info("🗑️ Database cleared (ride_requests, driver_tracker, driver_locations)")
+    logging.info("🗑️ Database cleared")
 
 async def get_connection():
     return await asyncpg.connect(DATABASE_URL)
@@ -97,7 +96,6 @@ def get_start_keyboard():
     return kb
 
 def get_main_menu(role=None):
-    """Главное меню после регистрации"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     if role == 'employee':
         kb.add(KeyboardButton('🙋‍♂️ Я еду'))
@@ -138,6 +136,16 @@ async def deactivate_tracker(user_id: int, stop_live: bool = True):
     await conn.execute("DELETE FROM ride_requests WHERE status = 'active'")
     await conn.execute("DELETE FROM driver_locations WHERE user_id = $1", user_id)
     await conn.close()
+    
+    # Отправляем уведомление в группу
+    await bot.send_message(
+        GROUP_CHAT_ID,
+        "🔴 *Трансляция завершена*\n\n"
+        "📍 Водитель остановил трансляцию.\n"
+        "🗑️ Все активные заявки удалены.\n\n"
+        "🚌 Следующий рейс будет позже.",
+        parse_mode='Markdown'
+    )
     logging.info(f"Tracker deactivated for user {user_id}")
 
 async def auto_expire_tracker(user_id: int, expire_time: datetime):
@@ -147,6 +155,26 @@ async def auto_expire_tracker(user_id: int, expire_time: datetime):
     await deactivate_tracker(user_id, stop_live=True)
     await bot.send_message(user_id, "⏰ 2-часовой локатор истёк. Заявки сброшены.")
     await bot.send_message(GROUP_CHAT_ID, "⏰ Трансляция местоположения завершена. Заявки сброшены.")
+
+# --- Фоновая проверка вебхука ---
+async def webhook_health_check():
+    """Проверка вебхука каждые 10 минут, автосброс при ошибках"""
+    while True:
+        await asyncio.sleep(600)  # 10 минут
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    if data.get('result', {}).get('last_error_date'):
+                        logging.warning("⚠️ Webhook error detected, resetting...")
+                        await bot.delete_webhook()
+                        await asyncio.sleep(2)
+                        webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
+                        await bot.set_webhook(webhook_url)
+                        logging.info("✅ Webhook reset")
+        except Exception as e:
+            logging.error(f"Health check error: {e}")
 
 # --- Хендлеры ---
 def register_handlers(dp: Dispatcher):
@@ -179,7 +207,6 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer(welcome_text, parse_mode='Markdown', reply_markup=get_start_keyboard())
 
-    # --- КОМАНДА ДЛЯ СБРОСА ПОЛЬЗОВАТЕЛЯ ---
     @dp.message_handler(commands=['resetme'])
     async def reset_user(message: types.Message):
         user_id = message.from_user.id
@@ -459,7 +486,7 @@ def register_handlers(dp: Dispatcher):
         else:
             await message.answer('Нет активного действия для отмены.')
 
-# --- Запуск с автоматическим сбросом вебхука и очисткой БД ---
+# --- Запуск ---
 async def on_startup(dp):
     await bot.delete_webhook()
     logging.info("⏹️ Old webhook deleted")
@@ -474,6 +501,9 @@ async def on_startup(dp):
     webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
     await bot.set_webhook(webhook_url)
     logging.info(f"✅ Webhook set to {webhook_url}")
+    
+    # Запускаем фоновую проверку вебхука
+    asyncio.create_task(webhook_health_check())
 
 async def on_shutdown(dp):
     await bot.delete_webhook()
@@ -491,4 +521,4 @@ if __name__ == '__main__':
         on_shutdown=on_shutdown,
         host='0.0.0.0',
         port=int(os.environ.get("PORT", 10000))
-)
+    )
