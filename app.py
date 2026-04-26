@@ -158,20 +158,26 @@ async def auto_expire_tracker(user_id: int, expire_time: datetime):
 
 # --- Фоновая проверка вебхука ---
 async def webhook_health_check():
-    """Проверка вебхука каждые 10 минут, автосброс при ошибках"""
+    """Проверка вебхука каждые 10 минут, автосброс при проблемах"""
     while True:
         await asyncio.sleep(600)  # 10 минут
         try:
             async with aiohttp.ClientSession() as session:
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
-                async with session.get(url) as resp:
+                async with session.get(url, timeout=10) as resp:
                     data = await resp.json()
-                    if data.get('result', {}).get('last_error_date'):
+                    webhook_url = data.get('result', {}).get('url')
+                    if not webhook_url:
+                        logging.warning("⚠️ Webhook is empty, resetting...")
+                        webhook = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
+                        await bot.set_webhook(webhook)
+                        logging.info("✅ Webhook reset")
+                    elif data.get('result', {}).get('last_error_date'):
                         logging.warning("⚠️ Webhook error detected, resetting...")
                         await bot.delete_webhook()
                         await asyncio.sleep(2)
-                        webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
-                        await bot.set_webhook(webhook_url)
+                        webhook = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
+                        await bot.set_webhook(webhook)
                         logging.info("✅ Webhook reset")
         except Exception as e:
             logging.error(f"Health check error: {e}")
@@ -488,21 +494,54 @@ def register_handlers(dp: Dispatcher):
 
 # --- Запуск ---
 async def on_startup(dp):
-    await bot.delete_webhook()
-    logging.info("⏹️ Old webhook deleted")
+    # 1. Проверяем, что сервер готов
+    webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
+    if not webhook_url:
+        logging.error("❌ RENDER_EXTERNAL_URL not set!")
+        return
     
+    # 2. Удаляем старый вебхук
+    try:
+        await bot.delete_webhook()
+        logging.info("⏹️ Old webhook deleted")
+    except Exception as e:
+        logging.warning(f"Delete webhook error (ignored): {e}")
+    
+    # 3. Пауза
     await asyncio.sleep(2)
     
-    await clear_db()
-    logging.info("🗑️ Database cleared")
+    # 4. Очищаем БД
+    try:
+        await clear_db()
+        logging.info("🗑️ Database cleared")
+    except Exception as e:
+        logging.error(f"Clear DB error: {e}")
     
-    await init_db()
+    # 5. Создаём таблицы
+    try:
+        await init_db()
+        logging.info("✅ Database initialized")
+    except Exception as e:
+        logging.error(f"Init DB error: {e}")
     
-    webhook_url = os.getenv('RENDER_EXTERNAL_URL') + '/webhook'
-    await bot.set_webhook(webhook_url)
-    logging.info(f"✅ Webhook set to {webhook_url}")
+    # 6. Устанавливаем вебхук
+    try:
+        await bot.set_webhook(webhook_url)
+        logging.info(f"✅ Webhook set to {webhook_url}")
+        
+        # Проверяем, что вебхук действительно установился
+        async with aiohttp.ClientSession() as session:
+            check_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
+            async with session.get(check_url, timeout=10) as resp:
+                data = await resp.json()
+                if data.get('ok') and data.get('result', {}).get('url'):
+                    logging.info("✅ Webhook verified")
+                else:
+                    logging.warning(f"⚠️ Webhook verification failed: {data}")
+    except Exception as e:
+        logging.error(f"❌ Set webhook error: {e}")
     
-    # Запускаем фоновую проверку вебхука
+    # 7. Запускаем фоновую проверку вебхука
     asyncio.create_task(webhook_health_check())
 
 async def on_shutdown(dp):
